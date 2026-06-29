@@ -1,0 +1,903 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Database, 
+  Code, 
+  Terminal, 
+  Play, 
+  Copy, 
+  Check, 
+  Upload, 
+  Plus, 
+  Trash2, 
+  FileSpreadsheet, 
+  Settings, 
+  Sparkles, 
+  BookOpen, 
+  HelpCircle, 
+  RotateCcw,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  History,
+  Info
+} from 'lucide-react';
+
+// Default schema presets to make the app immediately testable and functional
+const SCHEMA_PRESETS = {
+  employee: {
+    name: "Employee Directory",
+    tableName: "employee_data",
+    question: "Find the top 3 highest-paid employees in the Engineering department who were hired after 2022.",
+    language: "SQL",
+    columns: [
+      { name: "employee_id", type: "INTEGER", description: "Unique identifier for each employee" },
+      { name: "first_name", type: "VARCHAR", description: "First name of employee" },
+      { name: "last_name", type: "VARCHAR", description: "Last name of employee" },
+      { name: "department", type: "VARCHAR", description: "Department name" },
+      { name: "salary", type: "DECIMAL", description: "Annual gross salary in USD" },
+      { name: "hire_date", type: "DATE", description: "Date the employee joined the company" },
+      { name: "performance_rating", type: "INTEGER", description: "Latest performance score from 1 (low) to 5 (high)" }
+    ]
+  },
+  sales: {
+    name: "Sales Transactions",
+    tableName: "sales_data",
+    question: "Calculate the total sales and average order value for each product category in Q4 2025, sorted by total sales descending.",
+    language: "Python",
+    columns: [
+      { name: "transaction_id", type: "INTEGER", description: "Unique order/transaction ID" },
+      { name: "customer_id", type: "VARCHAR", description: "Unique customer identifier" },
+      { name: "product_category", type: "VARCHAR", description: "Category of product purchased" },
+      { name: "quantity", type: "INTEGER", description: "Number of items purchased" },
+      { name: "unit_price", type: "DECIMAL", description: "Price per single item unit" },
+      { name: "discount", type: "DECIMAL", description: "Percentage discount applied (0.00 to 1.00)" },
+      { name: "order_date", type: "DATE", description: "Timestamp of purchase order" },
+      { name: "region", type: "VARCHAR", description: "Geographic sales region (e.g., North, West)" }
+    ]
+  },
+  subscriptions: {
+    name: "SaaS Subscriptions",
+    tableName: "subscription_data",
+    question: "Which subscription plans had the highest customer churn rate last month, and what was their average lifetime value (LTV)?",
+    language: "SQL",
+    columns: [
+      { name: "subscription_id", type: "VARCHAR", description: "Unique subscription identifier" },
+      { name: "plan_name", type: "VARCHAR", description: "Name of SaaS tier (Basic, Pro, Enterprise)" },
+      { name: "monthly_rate", type: "DECIMAL", description: "Recurring monthly cost in USD" },
+      { name: "signup_date", type: "DATE", description: "Date subscriber registered" },
+      { name: "churn_date", type: "DATE", description: "Date subscription was cancelled, null if active" },
+      { name: "status", type: "VARCHAR", description: "Status of membership (active, churned, paused)" },
+      { name: "support_tickets_opened", type: "INTEGER", description: "Total customer service tickets submitted" }
+    ]
+  }
+};
+
+const COLUMN_TYPES = [
+  "VARCHAR",
+  "INTEGER",
+  "DECIMAL",
+  "DATE",
+  "BOOLEAN",
+  "TIMESTAMP",
+  "FLOAT"
+];
+
+export default function App() {
+  const [selectedPreset, setSelectedPreset] = useState("employee");
+  const [tableName, setTableName] = useState("employee_data");
+  const [columns, setColumns] = useState(SCHEMA_PRESETS.employee.columns);
+  const [language, setLanguage] = useState("SQL");
+  const [businessQuestion, setBusinessQuestion] = useState(SCHEMA_PRESETS.employee.question);
+  
+  // Custom manual columns builder inputs
+  const [newColName, setNewColName] = useState("");
+  const [newColType, setNewColType] = useState("VARCHAR");
+  const [newColDesc, setNewColDesc] = useState("");
+
+  // LLM Call state
+  const [isLoading, setIsLoading] = useState(false);
+  const [generatedCode, setGeneratedCode] = useState("");
+  const [generatedExplanation, setGeneratedExplanation] = useState("");
+  const [rawOutput, setRawOutput] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
+  const [copied, setCopied] = useState(false);
+  
+  // History and UI state
+  const [history, setHistory] = useState([]);
+  const [showPromptPreview, setShowPromptPreview] = useState(false);
+  const [notification, setNotification] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  // Initialize with the employee preset
+  useEffect(() => {
+    loadPreset("employee");
+  }, []);
+
+  const triggerToast = (message, type = "success") => {
+    setNotification({ message, type });
+    setTimeout(() => {
+      setNotification(null);
+    }, 4000);
+  };
+
+  const loadPreset = (key) => {
+    const preset = SCHEMA_PRESETS[key];
+    if (preset) {
+      setSelectedPreset(key);
+      setColumns(preset.columns);
+      setBusinessQuestion(preset.question);
+      setLanguage(preset.language);
+      setTableName(preset.tableName || "employee_data");
+      triggerToast(`Loaded "${preset.name}" template.`, "info");
+    }
+  };
+
+  const handleAddColumn = () => {
+    if (!newColName.trim()) {
+      triggerToast("Column name cannot be empty", "error");
+      return;
+    }
+    // Clean column name (replace spaces and special chars with underscores)
+    const formattedName = newColName.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    
+    // Check for duplicates
+    if (columns.some(col => col.name === formattedName)) {
+      triggerToast(`Column "${formattedName}" already exists`, "error");
+      return;
+    }
+
+    setColumns([
+      ...columns,
+      { name: formattedName, type: newColType, description: newColDesc.trim() || "No description provided" }
+    ]);
+    
+    // Reset inputs
+    setNewColName("");
+    setNewColDesc("");
+    triggerToast(`Added column "${formattedName}"`, "success");
+  };
+
+  const handleDeleteColumn = (indexToDelete) => {
+    const deletedCol = columns[indexToDelete].name;
+    setColumns(columns.filter((_, idx) => idx !== indexToDelete));
+    triggerToast(`Removed column "${deletedCol}"`, "info");
+  };
+
+  const clearAllColumns = () => {
+    setColumns([]);
+    triggerToast("Cleared all columns. Ready for custom input!", "info");
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    processUploadedFile(file);
+  };
+
+  const processUploadedFile = (file) => {
+    const reader = new FileReader();
+    const fileExtension = file.name.split('.').pop().toLowerCase();
+    
+    if (fileExtension !== 'csv' && fileExtension !== 'txt') {
+      triggerToast("Only CSV or plain text schema uploads are supported directly in the browser. For Excel files, save them as CSV and drop them here!", "error");
+      return;
+    }
+
+    reader.onload = (event) => {
+      try {
+        const text = event.target.result;
+        const lines = text.split(/\r?\n/);
+        if (lines.length === 0 || !lines[0]) {
+          triggerToast("The file appears to be empty.", "error");
+          return;
+        }
+
+        // Simple CSV Header extraction
+        const headers = lines[0].split(',').map(h => h.trim().replace(/^["']|["']$/g, ''));
+        
+        // Peek at first data row (if any) to infer data types
+        const firstRow = lines.length > 1 && lines[1] ? lines[1].split(',') : [];
+        
+        const inferredColumns = headers.map((header, index) => {
+          const sampleValue = firstRow[index] ? firstRow[index].trim().replace(/^["']|["']$/g, '') : "";
+          let inferredType = "VARCHAR";
+          
+          if (sampleValue) {
+            // Check if Number
+            if (!isNaN(sampleValue) && sampleValue !== "") {
+              inferredType = sampleValue.includes('.') ? "DECIMAL" : "INTEGER";
+            } 
+            // Check if Date (simple regex check)
+            else if (Date.parse(sampleValue) && isNaN(sampleValue) && sampleValue.includes('-') || sampleValue.includes('/')) {
+              inferredType = "DATE";
+            }
+            // Check if Boolean
+            else if (/^(true|false|yes|no|1|0)$/i.test(sampleValue)) {
+              inferredType = "BOOLEAN";
+            }
+          }
+
+          const colName = header.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+          return {
+            name: colName || `column_${index + 1}`,
+            type: inferredType,
+            description: `Imported from ${file.name}`
+          };
+        });
+
+        setColumns(inferredColumns);
+        // Extract standard clean file name for table name
+        const cleanFileName = file.name.split('.')[0].toLowerCase().replace(/[^a-z0-9_]/g, '_') + "_data";
+        setTableName(cleanFileName);
+        
+        triggerToast(`Successfully parsed ${inferredColumns.length} columns from ${file.name}!`, "success");
+      } catch (err) {
+        console.error("Error parsing file", err);
+        triggerToast("Failed to parse file headers. Ensure it is a valid comma-separated values file.", "error");
+      }
+    };
+
+    reader.readAsText(file);
+  };
+
+  // Drag and drop event handlers
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setDragOver(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      processUploadedFile(files[0]);
+    }
+  };
+
+  const renderSchemaText = () => {
+    if (columns.length === 0) return "No columns defined yet.";
+    return columns.map(col => `- ${col.name} (${col.type}): ${col.description}`).join("\n");
+  };
+
+  const generateFullPrompt = () => {
+    const schemaContent = renderSchemaText();
+    return `You are an expert data assistant. Your job is to help users analyze their uploaded Excel data by generating either a SQL query or Python (Pandas) code to answer their specific business questions.
+
+The user's uploaded Excel file has the following structure:
+### Data Schema ###
+Table Name/DataFrame: '${tableName}'
+Columns:
+${schemaContent}
+
+### Instructions ###
+1. Analyze the user's question and the provided data schema.
+2. Identify which language the user has requested: "SQL" or "Python".
+3. If the user requests SQL:
+   - Assume the data lives in a single table named 'employee_data'. (Note: Standardize to 'employee_data' as instructed).
+   - Generate a valid, optimized SQL query (ANSI SQL standard).
+4. If the user requests Python:
+   - Assume the data is loaded into a Pandas DataFrame named 'df'. (Note: Standardize to 'df' as instructed).
+   - Generate clean, readable Python code using Pandas syntax.
+5. Provide ONLY the requested code block inside standard markdown formatting. 
+6. Add a brief, 1-2 sentence explanation below the code explaining *how* it answers their question. Do not write a long essay.
+
+### User Request ###
+Requested Language: ${language}
+Business Question: ${businessQuestion}
+
+### Output ###`;
+  };
+
+  const runDataAssistant = async () => {
+    if (columns.length === 0) {
+      triggerToast("Please add at least one column to the schema.", "error");
+      return;
+    }
+    if (!businessQuestion.trim()) {
+      triggerToast("Please write a business question to analyze.", "error");
+      return;
+    }
+
+    setIsLoading(true);
+    setErrorMsg("");
+    setGeneratedCode("");
+    setGeneratedExplanation("");
+    setRawOutput("");
+
+    const systemPrompt = "You are a precise data engineering and SQL/Pandas generator assistant. Follow instruction strictly and output the block and brief sentence explanation.";
+    const userQuery = generateFullPrompt();
+    const apiKey = ""; // Canvas handles injected token at runtime when empty string
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+    const payload = {
+      contents: [{ parts: [{ text: userQuery }] }],
+      systemInstruction: {
+        parts: [{ text: systemPrompt }]
+      }
+    };
+
+    let attempt = 0;
+    const maxRetries = 3;
+    const baseDelay = 1000;
+
+    const executeCall = async () => {
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP status ${response.status}`);
+      }
+
+      return await response.json();
+    };
+
+    // Robust caller helper with exponential backoff
+    const callWithRetry = async () => {
+      try {
+        return await executeCall();
+      } catch (error) {
+        if (attempt < maxRetries) {
+          attempt++;
+          const delay = baseDelay * Math.pow(2, attempt);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return callWithRetry();
+        }
+        throw error;
+      }
+    };
+
+    try {
+      const result = await callWithRetry();
+      const candidate = result.candidates?.[0];
+      const textResponse = candidate?.content?.parts?.[0]?.text;
+
+      if (textResponse) {
+        setRawOutput(textResponse);
+        parseAssistantResponse(textResponse);
+        
+        // Add to history
+        const newHistoryItem = {
+          id: Date.now(),
+          timestamp: new Date().toLocaleTimeString(),
+          question: businessQuestion,
+          language: language,
+          raw: textResponse
+        };
+        setHistory(prev => [newHistoryItem, ...prev].slice(0, 10)); // keep last 10
+        triggerToast("Query generated successfully!", "success");
+      } else {
+        throw new Error("Empty response received from the model.");
+      }
+    } catch (err) {
+      console.error(err);
+      setErrorMsg(`An error occurred: ${err.message}. Please verify your network connection and try again.`);
+      triggerToast("Failed to generate code.", "error");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const parseAssistantResponse = (text) => {
+    // Look for markdown code blocks (e.g. ```sql or ```python)
+    const codeBlockRegex = /```(?:sql|python|pandas|py)?\n([\s\S]*?)\n```/i;
+    const match = text.match(codeBlockRegex);
+
+    if (match && match[1]) {
+      const code = match[1].trim();
+      setGeneratedCode(code);
+
+      // Everything else outside of the code block is typically the explanation
+      const explanationPart = text.replace(match[0], "").trim();
+      setGeneratedExplanation(explanationPart || "Explanation generated in markdown text below code block.");
+    } else {
+      // Fallback: If no markdown format found, render the response cleanly
+      setGeneratedCode(text);
+      setGeneratedExplanation("Note: Response was not captured inside standard code block format, displaying raw model output.");
+    }
+  };
+
+  const copyToClipboard = () => {
+    if (!generatedCode) return;
+    navigator.clipboard.writeText(generatedCode);
+    setCopied(true);
+    triggerToast("Copied to clipboard!", "success");
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-white antialiased">
+      
+      {/* Toast Notification */}
+      {notification && (
+        <div className={`fixed top-5 right-5 z-50 flex items-center space-x-2 px-4 py-3 rounded-xl border shadow-2xl transition-all duration-300 transform translate-y-0 scale-100 animate-bounce ${
+          notification.type === 'success' ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-200' :
+          notification.type === 'error' ? 'bg-rose-950/90 border-rose-500/50 text-rose-200' :
+          'bg-indigo-950/90 border-indigo-500/50 text-indigo-200'
+        }`}>
+          <div className="w-2 h-2 rounded-full bg-current animate-ping" />
+          <p className="text-sm font-medium">{notification.message}</p>
+        </div>
+      )}
+
+      {/* App Header */}
+      <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur-md sticky top-0 z-40 px-6 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+        <div className="flex items-center space-x-3">
+          <div className="p-2.5 bg-gradient-to-tr from-indigo-600 to-violet-500 rounded-xl shadow-lg shadow-indigo-500/20">
+            <Database className="w-6 h-6 text-white" />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
+              OmniQuery
+            </h1>
+            <p className="text-xs text-indigo-400 font-medium tracking-wide uppercase">AI-Powered SQL & Pandas Engineer</p>
+          </div>
+        </div>
+
+        <div className="flex items-center space-x-3">
+          <span className="text-xs px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 border border-slate-700 flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            Gemini Core Ready
+          </span>
+          <a 
+            href="#presets" 
+            className="text-xs text-indigo-400 hover:text-indigo-300 transition duration-150 flex items-center gap-1"
+          >
+            <HelpCircle className="w-4.5 h-4.5" /> Presets
+          </a>
+        </div>
+      </header>
+
+      {/* Main Workspace Layout */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        {/* Left Side: Configuration Panel (Inputs, Schemas, Presets) */}
+        <section className="lg:col-span-6 xl:col-span-5 flex flex-col space-y-6">
+          
+          {/* Quick Presets Segment */}
+          <div id="presets" className="bg-slate-900/40 border border-slate-800/80 rounded-2xl p-4 shadow-xl">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                Select a Starting Template
+              </span>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              {Object.keys(SCHEMA_PRESETS).map((key) => (
+                <button
+                  key={key}
+                  onClick={() => loadPreset(key)}
+                  className={`py-2 px-3 rounded-xl text-left text-xs transition duration-200 border ${
+                    selectedPreset === key 
+                      ? 'bg-indigo-600/15 border-indigo-500/80 text-white shadow-md shadow-indigo-500/5 font-semibold' 
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850 hover:text-slate-200'
+                  }`}
+                >
+                  <div className="flex items-center gap-1 mb-0.5">
+                    <FileSpreadsheet className="w-3.5 h-3.5 opacity-80" />
+                    <span className="truncate">{SCHEMA_PRESETS[key].name}</span>
+                  </div>
+                  <span className="text-[10px] text-indigo-400 block truncate">
+                    Default: {SCHEMA_PRESETS[key].language}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Schema & Column Editor Panel */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col space-y-4">
+            <div className="flex justify-between items-center">
+              <div>
+                <h2 className="text-base font-bold flex items-center gap-2">
+                  <FileSpreadsheet className="w-5 h-5 text-indigo-400" />
+                  Excel / CSV Data Schema
+                </h2>
+                <p className="text-xs text-slate-400">Define the column structure for your analysis</p>
+              </div>
+              <button 
+                onClick={clearAllColumns}
+                className="text-xs text-rose-400 hover:text-rose-300 font-medium px-2 py-1 hover:bg-rose-950/30 rounded transition"
+              >
+                Clear All
+              </button>
+            </div>
+
+            {/* Drag and Drop Area for File Upload */}
+            <div 
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition relative group ${
+                dragOver 
+                  ? 'border-indigo-500 bg-indigo-950/25' 
+                  : 'border-slate-800 bg-slate-950/40 hover:border-slate-700 hover:bg-slate-900/30'
+              }`}
+            >
+              <input 
+                type="file" 
+                id="file-upload" 
+                accept=".csv" 
+                onChange={handleFileUpload} 
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+              />
+              <div className="flex flex-col items-center space-y-2 pointer-events-none">
+                <div className="p-2 bg-slate-900 rounded-lg border border-slate-800 group-hover:border-indigo-500/50 transition">
+                  <Upload className="w-5 h-5 text-indigo-400" />
+                </div>
+                <p className="text-xs font-medium text-slate-300">
+                  Drag & Drop CSV or <span className="text-indigo-400">Browse</span>
+                </p>
+                <p className="text-[10px] text-slate-500">
+                  Loads columns & infers data types automatically
+                </p>
+              </div>
+            </div>
+
+            {/* Simulated Data Table Name Input */}
+            <div className="flex gap-2 items-center bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800">
+              <span className="text-xs font-mono text-slate-500 select-none">Target Object:</span>
+              <input 
+                type="text" 
+                value={tableName}
+                onChange={(e) => setTableName(e.target.value.replace(/[^a-zA-Z0-9_]/g, ''))}
+                placeholder="table_or_df_name"
+                className="bg-transparent border-none outline-none text-xs font-mono text-indigo-300 w-full focus:ring-0"
+              />
+            </div>
+
+            {/* Schema Columns List */}
+            <div className="max-h-56 overflow-y-auto pr-1 space-y-2 custom-scrollbar">
+              {columns.length === 0 ? (
+                <div className="text-center py-6 text-slate-500 text-xs flex flex-col items-center justify-center space-y-1 bg-slate-950/50 rounded-xl border border-slate-800/40">
+                  <Info className="w-5 h-5 text-slate-600 mb-1" />
+                  <span>No columns configured yet.</span>
+                  <span>Add manually below or drop a CSV file!</span>
+                </div>
+              ) : (
+                columns.map((col, index) => (
+                  <div 
+                    key={index} 
+                    className="flex items-center justify-between p-2.5 bg-slate-950 border border-slate-850 hover:border-slate-800 rounded-xl text-xs group transition"
+                  >
+                    <div className="flex-1 min-w-0 pr-2">
+                      <div className="flex items-center space-x-2">
+                        <span className="font-mono font-semibold text-slate-200 truncate">{col.name}</span>
+                        <span className="text-[10px] bg-slate-900 border border-slate-800 text-slate-400 px-1.5 py-0.5 rounded uppercase font-medium">
+                          {col.type}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 truncate mt-0.5 italic">{col.description}</p>
+                    </div>
+                    <button 
+                      onClick={() => handleDeleteColumn(index)}
+                      className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-rose-950/40 text-rose-400 hover:text-rose-300 rounded transition duration-150"
+                      title="Delete column"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Manual Column Builder Add Form */}
+            <div className="border-t border-slate-800 pt-3 space-y-2">
+              <span className="text-xs font-semibold text-slate-300 block mb-1">Add Custom Column</span>
+              <div className="grid grid-cols-2 gap-2">
+                <input 
+                  type="text" 
+                  value={newColName}
+                  onChange={(e) => setNewColName(e.target.value)}
+                  placeholder="Column Name (e.g. total_sales)"
+                  className="bg-slate-950 border border-slate-850 hover:border-slate-800 focus:border-indigo-500 text-xs px-3 py-2 rounded-xl text-slate-200 placeholder-slate-600 outline-none w-full transition"
+                />
+                <select
+                  value={newColType}
+                  onChange={(e) => setNewColType(e.target.value)}
+                  className="bg-slate-950 border border-slate-850 hover:border-slate-800 focus:border-indigo-500 text-xs px-3 py-2 rounded-xl text-slate-200 outline-none w-full cursor-pointer transition"
+                >
+                  {COLUMN_TYPES.map(type => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex gap-2">
+                <input 
+                  type="text" 
+                  value={newColDesc}
+                  onChange={(e) => setNewColDesc(e.target.value)}
+                  placeholder="Short explanation/description of value (optional)"
+                  className="bg-slate-950 border border-slate-850 hover:border-slate-800 focus:border-indigo-500 text-xs px-3 py-2 rounded-xl text-slate-200 placeholder-slate-600 outline-none flex-1 transition"
+                />
+                <button
+                  onClick={handleAddColumn}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold px-4 py-2 rounded-xl flex items-center justify-center gap-1.5 transition text-xs border border-slate-700"
+                >
+                  <Plus className="w-4 h-4" /> Add
+                </button>
+              </div>
+            </div>
+
+          </div>
+
+          {/* User Input & Settings Segment */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col space-y-4">
+            <div>
+              <h2 className="text-base font-bold flex items-center gap-2">
+                <Settings className="w-5 h-5 text-indigo-400" />
+                Query Target & Settings
+              </h2>
+              <p className="text-xs text-slate-400">Specify query target code style and your question</p>
+            </div>
+
+            {/* Language Toggle */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300">Target Analytics Engine</label>
+              <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1.5 rounded-xl border border-slate-850">
+                <button
+                  type="button"
+                  onClick={() => setLanguage("SQL")}
+                  className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
+                    language === 'SQL' 
+                      ? 'bg-indigo-600 text-white shadow-md' 
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+                  }`}
+                >
+                  <Database className="w-3.5 h-3.5" /> SQL (ANSI Code)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLanguage("Python")}
+                  className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
+                    language === 'Python' 
+                      ? 'bg-indigo-600 text-white shadow-md' 
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
+                  }`}
+                >
+                  <Code className="w-3.5 h-3.5" /> Python (Pandas)
+                </button>
+              </div>
+            </div>
+
+            {/* Business Question Textarea */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold text-slate-300">Your Specific Business Question</label>
+              <textarea
+                value={businessQuestion}
+                onChange={(e) => setBusinessQuestion(e.target.value)}
+                placeholder="E.g., Which region brought in the highest gross revenue with discounts below 15%?"
+                rows={3}
+                className="w-full bg-slate-950 border border-slate-850 hover:border-slate-850 focus:border-indigo-500 rounded-xl p-3 text-xs text-slate-200 placeholder-slate-600 outline-none resize-none transition"
+              />
+            </div>
+
+            {/* Generate Action Button */}
+            <button
+              onClick={runDataAssistant}
+              disabled={isLoading}
+              className={`w-full py-3.5 rounded-xl font-bold flex items-center justify-center gap-2 text-sm shadow-xl transition transform active:scale-[0.98] ${
+                isLoading 
+                  ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' 
+                  : 'bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white shadow-indigo-600/10 hover:shadow-indigo-500/20'
+              }`}
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-indigo-500/30 border-t-indigo-400 rounded-full animate-spin" />
+                  Generating Query...
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 fill-current" />
+                  Generate {language} Query
+                </>
+              )}
+            </button>
+          </div>
+
+        </section>
+
+        {/* Right Side: Output Panel (Code Terminal & AI Explanation) */}
+        <section className="lg:col-span-6 xl:col-span-7 flex flex-col space-y-6">
+
+          {/* Collapsible Live Prompt Inspector */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+            <button
+              onClick={() => setShowPromptPreview(!showPromptPreview)}
+              className="w-full px-5 py-3 bg-slate-850 flex justify-between items-center text-xs font-semibold text-slate-300 hover:bg-slate-800 hover:text-white transition"
+            >
+              <span className="flex items-center gap-1.5">
+                <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                Live API Prompt Preview (System Instructions)
+              </span>
+              {showPromptPreview ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+            {showPromptPreview && (
+              <div className="p-4 bg-slate-950 border-t border-slate-850 max-h-60 overflow-y-auto font-mono text-[10.5px] text-slate-400 leading-relaxed whitespace-pre-wrap custom-scrollbar">
+                {generateFullPrompt()}
+              </div>
+            )}
+          </div>
+
+          {/* Results Workspace Panel */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex-1 flex flex-col space-y-4">
+            
+            <div className="flex justify-between items-center border-b border-slate-800/80 pb-3">
+              <div>
+                <h2 className="text-base font-bold flex items-center gap-2">
+                  <Terminal className="w-5 h-5 text-indigo-400" />
+                  Terminal Code Sandbox
+                </h2>
+                <p className="text-xs text-slate-400">Generated query ready to insert into your workflow</p>
+              </div>
+              
+              {generatedCode && (
+                <button
+                  onClick={copyToClipboard}
+                  className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 px-3 py-1.5 rounded-lg text-xs font-semibold transition duration-150"
+                  title="Copy code to clipboard"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? "Copied!" : "Copy Code"}
+                </button>
+              )}
+            </div>
+
+            {/* Loading Placeholder */}
+            {isLoading && (
+              <div className="flex-1 flex flex-col justify-center items-center py-20 space-y-4">
+                <div className="relative w-16 h-16">
+                  <div className="absolute inset-0 border-4 border-indigo-500/20 rounded-full" />
+                  <div className="absolute inset-0 border-4 border-t-indigo-500 border-r-indigo-500/40 rounded-full animate-spin" />
+                </div>
+                <div className="text-center space-y-1 animate-pulse">
+                  <p className="text-sm font-semibold text-slate-200">Processing Business Intelligence Schema...</p>
+                  <p className="text-xs text-slate-500">Formulating optimal analytical query sequence</p>
+                </div>
+              </div>
+            )}
+
+            {/* Error Message Box */}
+            {errorMsg && !isLoading && (
+              <div className="bg-rose-950/30 border border-rose-900/60 rounded-xl p-4 text-rose-300 text-xs flex flex-col space-y-2">
+                <span className="font-bold flex items-center gap-1">❌ Execution Encountered an Error</span>
+                <p>{errorMsg}</p>
+              </div>
+            )}
+
+            {/* Empty Workspace / Prompt Guide */}
+            {!generatedCode && !isLoading && !errorMsg && (
+              <div className="flex-1 flex flex-col justify-center items-center py-20 text-center space-y-3 px-6">
+                <div className="p-4 bg-slate-950 rounded-2xl border border-slate-850 text-indigo-400 shadow-inner">
+                  <Database className="w-8 h-8 mx-auto" />
+                </div>
+                <div className="max-w-md">
+                  <h3 className="text-sm font-bold text-slate-200">Workspace Empty</h3>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    Set up your schema columns, select either SQL or Pandas, and hit <strong className="text-indigo-400">"Generate Query"</strong> to see clean, fully functional code blocks.
+                  </p>
+                </div>
+                <div className="pt-2">
+                  <button 
+                    onClick={() => loadPreset("employee")}
+                    className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold"
+                  >
+                    Load Directory Preset
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Output Segment (Code Box + Explanation) */}
+            {generatedCode && !isLoading && (
+              <div className="flex-1 flex flex-col space-y-4">
+                
+                {/* Code Block Visualizer */}
+                <div className="relative group/terminal">
+                  <div className="absolute top-3 right-3 opacity-30 group-hover/terminal:opacity-100 transition text-[10px] font-mono text-slate-400 bg-slate-850 px-2 py-0.5 rounded border border-slate-800">
+                    {language.toUpperCase()} ENGINE
+                  </div>
+                  <pre className="w-full bg-slate-950 border border-slate-850 rounded-xl p-4 md:p-5 overflow-x-auto text-xs font-mono text-indigo-100 leading-relaxed custom-scrollbar whitespace-pre shadow-inner">
+                    <code>{generatedCode}</code>
+                  </pre>
+                </div>
+
+                {/* Description and Explain Area */}
+                <div className="bg-indigo-950/20 border border-indigo-900/40 rounded-xl p-4 space-y-2">
+                  <h3 className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5 text-indigo-400" />
+                    How this Query Answers your Question
+                  </h3>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    {generatedExplanation}
+                  </p>
+                </div>
+
+                {/* Simulated Target Data Preview Panel */}
+                <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-950/50">
+                  <div className="px-4 py-2 bg-slate-950 border-b border-slate-850 flex justify-between items-center">
+                    <span className="text-[10px] font-mono font-bold text-slate-400 uppercase tracking-wider">
+                      Target Table Schema Mapping Verification
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      Standardized as: {language === 'SQL' ? "'employee_data'" : "'df'"}
+                    </span>
+                  </div>
+                  <div className="p-3 text-[11px] text-slate-400 font-mono space-y-1">
+                    <div className="flex gap-2 text-slate-500">
+                      <span>Mapped Columns:</span>
+                      <span className="text-indigo-300">{columns.map(c => c.name).slice(0, 5).join(", ")}{columns.length > 5 ? '...' : ''}</span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            )}
+
+          </div>
+
+          {/* Quick Session History */}
+          {history.length > 0 && (
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <History className="w-3.5 h-3.5 text-indigo-400" />
+                Session History
+              </h3>
+              <div className="divide-y divide-slate-850">
+                {history.map((item) => (
+                  <div key={item.id} className="py-2.5 flex items-center justify-between text-xs">
+                    <div className="flex-1 min-w-0 pr-2">
+                      <p className="text-slate-200 truncate font-medium">{item.question}</p>
+                      <span className="text-[10px] text-slate-500">
+                        {item.timestamp} • Mode: <span className="text-indigo-400 font-semibold">{item.language}</span>
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setBusinessQuestion(item.question);
+                        setLanguage(item.language);
+                        parseAssistantResponse(item.raw);
+                        triggerToast(`Restored query from session history.`, "info");
+                      }}
+                      className="text-[10px] text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1 px-2 py-1 bg-slate-950/50 rounded border border-slate-850 hover:border-slate-800 transition"
+                    >
+                      <RotateCcw className="w-3 h-3" /> Restore
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+        </section>
+
+      </main>
+
+      {/* Styled custom scrollbar styling in global styles */}
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar {
+          width: 6px;
+          height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+          background: #0b1329;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: #1e293b;
+          border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+          background: #334155;
+        }
+      `}</style>
+    </div>
+  );
+}
